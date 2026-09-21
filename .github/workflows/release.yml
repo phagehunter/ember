@@ -1,0 +1,59 @@
+name: Build installers
+
+# Runs whenever a version tag like v1.0.0 is pushed. Builds Ember for
+# Apple Silicon Macs, Intel Macs, and Windows, then attaches the
+# installers to a GitHub Release with that tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install the Tauri command-line tool
+        run: npm install
+
+      - name: Generate app icons from app-icon.png
+        run: npm run icons
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Ember ${{ github.ref_name }}"
+          releaseBody: |
+            **Mac:** download the `.dmg` (`aarch64` for Apple Silicon, `x64` for Intel), open it, drag Ember to Applications. The first launch needs right-click → Open because the app is not code-signed.
+            **Windows:** download the `-setup.exe`. If SmartScreen appears, choose More info → Run anyway.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

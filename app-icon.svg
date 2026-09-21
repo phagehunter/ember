@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#151C33"/>
+      <stop offset="1" stop-color="#0B0F1D"/>
+    </linearGradient>
+    <radialGradient id="flame" cx="0.5" cy="0.78" r="0.62">
+      <stop offset="0" stop-color="#FFD37A"/>
+      <stop offset="0.35" stop-color="#F2B443"/>
+      <stop offset="0.7" stop-color="#E0555C"/>
+      <stop offset="1" stop-color="#E0555C" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.6" r="0.5">
+      <stop offset="0" stop-color="#F2B443" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#F2B443" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <circle cx="512" cy="560" r="400" fill="url(#glow)"/>
+  <g transform="translate(512 540)">
+    <rect x="-250" y="-330" width="500" height="660" rx="52" fill="#FFFFFF" fill-opacity="0.06" stroke="#8B9AFF" stroke-opacity="0.55" stroke-width="10"/>
+    <path d="M0 -215 C 70 -130 150 -60 150 50 C 150 150 80 210 0 215 C -80 210 -150 150 -150 50 C -150 -60 -70 -130 0 -215 Z" fill="url(#flame)"/>
+    <path d="M0 -80 C 40 -30 80 10 80 70 C 80 130 40 165 0 168 C -40 165 -80 130 -80 70 C -80 10 -40 -30 0 -80 Z" fill="#FFF3D0" fill-opacity="0.9"/>
+  </g>
+</svg>
