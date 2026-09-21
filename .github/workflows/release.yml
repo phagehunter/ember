@@ -48,12 +48,16 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No paid Apple certificate: sign the whole bundle ad-hoc ("-") so macOS
+          # treats it as an unidentified-developer app instead of a damaged one.
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Ember ${{ github.ref_name }}"
           releaseBody: |
-            **Mac:** download the `.dmg` (`aarch64` for Apple Silicon, `x64` for Intel), open it, drag Ember to Applications. The first launch needs right-click → Open because the app is not code-signed.
+            **Mac:** download the `.dmg` (`aarch64` for Apple Silicon, `x64` for Intel), open it, drag Ember to Applications. On first launch macOS warns about an unidentified developer: right-click Ember → Open, or System Settings → Privacy & Security → Open Anyway. If it says "damaged", run `xattr -cr /Applications/Ember.app` in Terminal once (see README).
             **Windows:** download the `-setup.exe`. If SmartScreen appears, choose More info → Run anyway.
           releaseDraft: false
-          prerelease: false
+          # Versions below 1.0 are published as pre-releases.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
           args: ${{ matrix.args }}

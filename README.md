@@ -1,6 +1,6 @@
 # Ember
 
-Free spaced-repetition flashcards for Mac and Windows. Ember uses the same scheduling algorithm as Anki (FSRS-6) and keeps the parts that make it work: short learning steps, four grades, and a target of 90% recall at review time. It drops the parts that get in the way, so making cards takes a minute and reviewing feels calm.
+**Early pre-release (0.x).** Free spaced-repetition flashcards for Mac and Windows. Ember uses the same scheduling algorithm as Anki (FSRS-6) and keeps the parts that make it work: short learning steps, four grades, and a target of 90% recall at review time. It drops the parts that get in the way, so making cards takes a minute and reviewing feels calm.
 
 No account, no subscription, no internet needed after install. Your cards live in one file on your computer.
 
@@ -26,6 +26,14 @@ Ember is not signed with a paid Apple developer certificate, so macOS will warn 
 
 You only do this once.
 
+**If macOS says "Ember is damaged and can't be opened":** it isn't damaged. That wording is what Gatekeeper shows for unsigned downloads. With Ember already in Applications, open **Terminal** (Spotlight → type Terminal) and paste this line, then press Return:
+
+```bash
+xattr -cr /Applications/Ember.app
+```
+
+Then open Ember normally. This removes the "downloaded from the internet" flag from the app; it changes nothing else.
+
 ### First launch on Windows
 
 If Windows SmartScreen appears, click **More info**, then **Run anyway**.
@@ -45,14 +53,22 @@ Each button shows when the card will come back. Space flips the card, E edits it
 
 **Add cards** has two routes:
 
-- **Quick add:** type one card per line as `question | answer`. Add a third part after another `|` for a hint. Wrap text in `{{c1::like this}}` for a fill-in-the-blank card. Choose `term = meaning` to make vocabulary cards in both directions.
-- **Ask an AI assistant:** paste your notes into Claude, ChatGPT, or any assistant, click **Copy deck list** in Ember and paste that too, and ask for an Ember backup file. Save the `.json` file it gives you and use **Restore backup** to load the cards.
+**Add cards** is one box. Type or paste your cards and Ember shows you what it found before anything is saved. It reads:
 
-**Browse** searches every card. Click a card to edit, suspend, reset, or delete it.
+- `question | answer`, one per line, with an optional third `|` part for a hint.
+- `Q:` and `A:` on separate lines, or a question line followed by its answer line.
+- Markdown tables, tab-separated columns, and `question :: answer`.
+- `{{c1::hidden text}}` anywhere, which makes a fill-in-the-blank card.
+- `Deck: Name` on its own line, sending the cards below it to that deck and creating it if needed.
+- `#tag` at the end of a line.
+
+To have an AI assistant write them for you, click **Copy prompt**, paste it into Claude, ChatGPT, Gemini or anything else along with your notes, and paste the reply back into the box. It answers in plain text, so no file and no paid account is needed.
+
+**Browse** searches every card. Click one to edit, suspend, reset, or delete it. Tick several to move them to another deck, tag them, suspend them, reset their progress, or delete them together.
 
 **Stats** shows your recall rate over the last 30 days, your streak, a review heatmap, and how many cards are due over the next month.
 
-**Settings** tunes the scheduler and makes backups. **Save backup** writes everything to one file. **Restore backup** reads one back in without deleting anything.
+**Settings** tunes the scheduler and makes backups. **Save backup** writes everything to one file. **Restore backup** reads one back in and asks which deck the cards should join, without deleting anything.
 
 ## Where your cards are stored
 
@@ -71,7 +87,7 @@ Defaults match Anki: learning steps of 1 and 10 minutes, a 10 minute relearning 
 
 ## Building it yourself
 
-Installers are built automatically by GitHub Actions when a version tag such as `v1.0.0` is pushed. To build on your own machine you need Node.js, Rust, and on a Mac the Xcode command line tools:
+Installers are built automatically by GitHub Actions when a version tag such as `v0.0.1` is pushed. Versions below 1.0 are early pre-releases: expect rough edges, and keep backups. To build on your own machine you need Node.js, Rust, and on a Mac the Xcode command line tools:
 
 ```bash
 npm install

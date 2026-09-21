@@ -1,4 +1,6 @@
 // ============================================================ utilities
+// One flame, drawn as a path so it stays crisp at any size.
+const FLAME_SVG = (n) => `<svg class="flame" width="${n}" height="${n}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><defs><linearGradient id="fl${n}" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#E23D46"/><stop offset="0.55" stop-color="#F08519"/><stop offset="1" stop-color="#FFC94B"/></linearGradient></defs><path d="M12 1.6c3.8 5.1 7.4 8 7.4 13A7.4 7.4 0 0 1 4.6 14.6c0-3.6 2.3-6.1 4.2-8.6.5 1.7 1.3 3 2.2 3.8.3-3.1-.2-5.6 1-8.2Z" fill="url(#fl${n})"/><path d="M12 12.2c1.9 2.3 2.9 3.6 2.9 5.2a2.9 2.9 0 0 1-5.8 0c0-1.6 1-2.9 2.9-5.2Z" fill="#FFF0C4" opacity="0.92"/></svg>`;
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -162,11 +164,119 @@ const store = {
     return this.flushing;
   },
   async put(coll, obj){ this[coll].set(obj.id, obj); this.emit(); this.save(); },
-  async remove(coll, id){ this[coll].delete(id); this.emit(); this.save(); },
+  async remove(coll, id){ if (coll === 'cards') state.sel?.delete(id); this[coll].delete(id); this.emit(); this.save(); },
   async saveSettings(s){ this.settings = { ...this.settings, ...s }; this.emit(); this.save(); }
 };
 
 // ============================================================ card helpers
+// Turn pasted text into notes. Deliberately forgiving: assistants and people
+// write cards in many shapes, and a rejected paste is worse than a stray card.
+function parsePasted(text, mode){
+  const out = [];
+  const t = (text || '').trim();
+  if (!t) return out;
+  const isCloze = v => /\{\{c\d+::/.test(v);
+  const push = (type, front, back, extra, deck) => {
+    front = (front || '').trim(); back = (back || '').trim(); extra = (extra || '').trim();
+    if (!front) return;
+    const tags = [];
+    const grab = v => v.replace(/(^|\s)#([A-Za-z0-9][\w-]{0,29})(?=\s|$)/g, (_, sp, tag) => { tags.push(tag); return ''; }).trim();
+    extra = grab(extra); back = grab(back); if (!back && !extra) front = grab(front);
+    if (isCloze(front)) type = 'cloze';
+    else if (!back) return;
+    out.push({ type, front, back, extra, tags, deck: deck || null, on: true });
+  };
+  // 1. JSON pasted as text (an array, or an object with cards/notes).
+  if (t[0] === '{' || t[0] === '[') {
+    try {
+      const j = JSON.parse(t);
+      const arr = Array.isArray(j) ? j : (j.cards || j.notes || []);
+      for (const c of arr){
+        if (!c || typeof c !== 'object') continue;
+        const front = String(c.front ?? c.question ?? c.q ?? c.term ?? c.text ?? '');
+        const back = String(c.back ?? c.answer ?? c.a ?? c.definition ?? c.meaning ?? '');
+        const type = c.type === 'vocab' ? 'vocab' : c.type === 'cloze' ? 'cloze' : 'basic';
+        const extra = String(c.extra ?? c.hint ?? c.note ?? '');
+        const tags = Array.isArray(c.tags) ? c.tags.map(String) : [];
+        const deck = c.deck ? String(c.deck) : null;
+        const before = out.length;
+        push(type, front, back, extra, deck);
+        if (out.length > before && tags.length) out[out.length-1].tags.push(...tags);
+      }
+      if (out.length) return out;
+    } catch {}
+  }
+  // 2. Line-oriented formats.
+  let deck = null, pendingQ = null, pendingExtra = null;
+  const flush = () => { if (pendingQ != null){ push('basic', pendingQ, '', pendingExtra, deck); pendingQ = pendingExtra = null; } };
+  const blocks = [];
+  let block = [];
+  for (const raw of t.split('\n')){
+    const line = raw.trim();
+    if (!line){ block.length && blocks.push(block); block = []; continue; }
+    block.push(line);
+  }
+  if (block.length) blocks.push(block);
+  for (const lines of blocks){
+    for (let line of lines){
+      // Explicit deck marker: "Deck: Name", "# Deck: Name", "[Deck: Name]".
+      const dm = line.match(/^[#\[\s]*deck\s*[:\-]\s*(.+?)[\]\s]*$/i);
+      if (dm){ flush(); deck = dm[1].trim() || null; continue; }
+      // Markdown heading or table separator: not a card.
+      if (/^#{1,6}\s/.test(line) || /^\|?\s*[-:| ]{5,}\s*\|?$/.test(line)) continue;
+      // Strip list markers and numbering.
+      line = line.replace(/^\s*(?:[-*•]|\d{1,3}[.)])\s+/, '');
+      if (!line) continue;
+      // Q:/A: style, accumulated across lines.
+      const qm = line.match(/^(?:q|question|front|term|word)\s*[:.]\s*(.*)$/i);
+      if (qm){ flush(); pendingQ = qm[1]; continue; }
+      const am = line.match(/^(?:a|answer|back|definition|meaning)\s*[:.]\s*(.*)$/i);
+      if (am && pendingQ != null){ push('basic', pendingQ, am[1], pendingExtra, deck); pendingQ = pendingExtra = null; continue; }
+      const em = line.match(/^(?:extra|hint|note|source|example)\s*[:.]\s*(.*)$/i);
+      if (em){ pendingExtra = em[1]; continue; }
+      // Markdown table row.
+      if (/^\|.*\|$/.test(line)){
+        const cells = line.slice(1, -1).split('|').map(c => c.trim());
+        if (cells.length >= 2 && !/^(question|front|term|word)$/i.test(cells[0])){ flush(); push(mode === 'vocab' ? 'vocab' : 'basic', cells[0], cells[1], cells.slice(2).join(' '), deck); }
+        continue;
+      }
+      // Separator formats, most explicit first.
+      let parts = null;
+      if (line.includes('\t')) parts = line.split('\t');
+      else if (line.includes('|')) parts = line.split('|');
+      else if (line.includes('::') && !isCloze(line)) parts = line.split('::');
+      else if (mode === 'vocab' && line.includes('=')) parts = line.split('=');
+      else if (/\s[—–]\s/.test(line) && !isCloze(line)) parts = line.split(/\s[—–]\s/);
+      if (parts){
+        flush();
+        parts = parts.map(p => p.trim()).filter((p, i) => p || i);
+        push(mode === 'vocab' ? 'vocab' : 'basic', parts[0], parts[1], parts.slice(2).join(' | '), deck);
+        continue;
+      }
+      if (isCloze(line)){ flush(); push('cloze', line, '', '', deck); continue; }
+      // A lone line: front of a pair whose answer is on the next line.
+      if (pendingQ == null) pendingQ = line;
+      else { push(mode === 'vocab' ? 'vocab' : 'basic', pendingQ, line, null, deck); pendingQ = null; }
+    }
+    flush();
+  }
+  return out;
+}
+const AI_PROMPT = `Turn the notes below into flashcards for spaced repetition.
+
+Reply with one card per line and nothing else, in this exact format:
+
+question | answer
+
+Rules:
+- One fact per card. Answers under 25 words.
+- Specific questions only, never yes/no.
+- For a fill-in-the-blank card, write the whole sentence with {{c1::the hidden part}} in double braces and leave off the "| answer".
+- You may add a third part after another | for a hint or source.
+- Do not number the lines. Do not add headings, commentary, or code blocks.
+
+NOTES:
+`;
 const STARTER_CARDS = [
   { type: 'basic', front: 'What does the thin colored bar at the top of a card show?', back: 'Your estimated chance of recalling the card right now.', extra: 'It fades toward red as memory decays. Reviews are scheduled for when it would reach your target.' },
   { type: 'cloze', front: 'Ember schedules with {{c1::FSRS-6}}, the same algorithm Anki uses, aiming for {{c2::90%}} recall at review time by default.', back: '', extra: 'You can change the target in Settings.' },
@@ -178,7 +288,7 @@ const STARTER_CARDS = [
   { type: 'vocab', front: 'la mémoire', back: 'memory (French)', extra: 'Vocabulary cards are made in both directions.' },
 ];
 function newCard(deckId, type, front, back, extra='', more={}){
-  return { id: uid('c'), deckId, type, front, back: back || '', extra: extra || '', createdAt: Date.now(), state: 'new', remaining: 0, due: 0, S: 0, D: 0, reps: 0, lapses: 0, lastReview: 0, ivl: 0, suspended: false, leech: false, history: [], ...more };
+  return { id: uid('c'), deckId, type, front, back: back || '', extra: extra || '', createdAt: Date.now(), state: 'new', remaining: 0, due: 0, S: 0, D: 0, reps: 0, lapses: 0, lastReview: 0, ivl: 0, suspended: false, leech: false, tags: [], history: [], ...more };
 }
 const CLOZE_RE = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
 function clozeIndices(text){ const s = new Set(); for (const m of text.matchAll(CLOZE_RE)) s.add(+m[1]); return [...s].sort((a,b)=>a-b); }
@@ -195,16 +305,17 @@ function plainFront(c){ return c.type === 'cloze' ? c.front.replace(CLOZE_RE, (_
 function expandNote(deckId, n){
   const type = n.type || 'basic', front = (n.front || '').trim(), back = (n.back || '').trim(), extra = (n.extra || '').trim();
   if (!front) return [];
+  const tags = Array.isArray(n.tags) && n.tags.length ? { tags: [...new Set(n.tags.map(String))] } : {};
   if (type === 'cloze'){
-    const idxs = clozeIndices(front); if (!idxs.length) return [newCard(deckId, 'basic', front, back, extra)];
-    const noteId = uid('n'); return idxs.map(i => newCard(deckId, 'cloze', front, back, extra, { clozeIndex: i, noteId }));
+    const idxs = clozeIndices(front); if (!idxs.length) return [newCard(deckId, 'basic', front, back, extra, tags)];
+    const noteId = uid('n'); return idxs.map(i => newCard(deckId, 'cloze', front, back, extra, { clozeIndex: i, noteId, ...tags }));
   }
   if (type === 'vocab'){
-    if (!back) return [newCard(deckId, 'basic', front, back, extra)];
+    if (!back) return [newCard(deckId, 'basic', front, back, extra, tags)];
     const pairId = uid('p');
-    return [newCard(deckId, 'basic', front, back, extra, { pairId, dir: 'fwd' }), newCard(deckId, 'basic', back, front, extra, { pairId, dir: 'rev' })];
+    return [newCard(deckId, 'basic', front, back, extra, { pairId, dir: 'fwd', ...tags }), newCard(deckId, 'basic', back, front, extra, { pairId, dir: 'rev', ...tags })];
   }
-  return [newCard(deckId, 'basic', front, back, extra)];
+  return [newCard(deckId, 'basic', front, back, extra, tags)];
 }
 
 // ============================================================ queue
@@ -239,14 +350,15 @@ function deckCounts(deckId, now){
 }
 
 // ============================================================ app state & routing
-const state = { view: 'today', deckFilter: null, review: null, browse: { q: '', deck: '', state: '' }, gen: { proposals: null, busy: false, ctl: null, status: '' }, addTab: 'quick', undo: null };
+const state = { view: 'today', deckFilter: null, review: null, browse: { q: '', deck: '', state: '', tag: '' }, sel: new Set(), paste: { text: '', mode: 'qa', deck: null, newDeck: '', notes: null }, gen: { proposals: null, busy: false, ctl: null, status: '' }, addTab: 'paste', undo: null };
 
-function go(view, opts={}){ state.view = view; Object.assign(state, opts); location.hash = view; render(); window.scrollTo({ top: 0 }); }
+function go(view, opts={}){ if (view !== state.view) state.sel.clear(); state.view = view; Object.assign(state, opts); location.hash = view; render(); window.scrollTo({ top: 0 }); }
 document.addEventListener('click', e => { const b = e.target.closest('[data-nav]'); if (b){ if (b.dataset.nav === 'today') state.deckFilter = null; go(b.dataset.nav); } });
 
 function render(){
   const main = $('#main');
   $$('[data-nav]').forEach(b => b.setAttribute('aria-current', b.dataset.nav === state.view || (state.view === 'review' && b.dataset.nav === 'today') ? 'page' : 'false'));
+  const wm = $('#wordmark'); if (wm && !wm.querySelector('svg')) wm.insertAdjacentHTML('afterbegin', FLAME_SVG(24));
   const ml = $('#modeLabel'); if (ml){ ml.innerHTML = store.mode === 'desktop' ? '<span class="dot"></span>Saved on this computer' : store.mode === 'local' ? '<span class="dot local"></span>This browser only' : '<span class="dot"></span>Connecting…'; }
   if (!store.ready){ main.innerHTML = '<div class="skeleton"></div>'; return; }
   const v = { today: viewToday, decks: viewDecks, add: viewAdd, browse: viewBrowse, stats: viewStats, settings: viewSettings, review: viewReview }[state.view] || viewToday;
@@ -257,6 +369,16 @@ store.onChange(() => { if (state.view !== 'review' && state.view !== 'add') rend
 
 function localBanner(){ return store.mode === 'local' ? '<div class="banner">Running in a web browser, so cards are kept only in this browser. The desktop app keeps them in a file you can back up.</div>' : store.desktopBroken ? '<div class="banner">The data file could not be opened. Changes will be lost when you quit.</div>' : ''; }
 function deckOptions(sel){ return [...store.decks.values()].sort((a,b)=>(a.order??0)-(b.order??0) || a.name.localeCompare(b.name)).map(d => `<option value="${d.id}" ${d.id===sel?'selected':''}>${esc(d.name)}</option>`).join(''); }
+function allTags(){ const t = new Set(); for (const c of store.cards.values()) for (const x of c.tags || []) t.add(x); return [...t].sort((a,b) => a.localeCompare(b)); }
+function parseTags(v){ return [...new Set(String(v || '').split(/[,\s]+/).map(x => x.replace(/^#/, '').trim()).filter(Boolean))]; }
+async function ensureDeck(name){
+  const n = String(name || '').trim(); if (!n) return null;
+  const hit = [...store.decks.values()].find(d => d.name.toLowerCase() === n.toLowerCase());
+  if (hit) return hit.id;
+  const d = { id: uid('d'), name: n, color: DECK_COLORS[store.decks.size % DECK_COLORS.length], createdAt: Date.now(), order: store.decks.size };
+  await store.put('decks', d); return d.id;
+}
+// Add parsed notes, honouring a per-note deck name when the paste supplied one.
 function streak(now){
   let n = 0, k = dayStart(now);
   if (!(store.stats.get(dayKey(k))?.reviews > 0)) k -= DAY;
@@ -321,7 +443,7 @@ function viewReview(){
     const wait = q.learn.concat(q.learnAhead).sort((a,b)=>a.due-b.due)[0];
     return `<div class="view">
       <div class="rv-top"><button class="btn ghost sm" data-nav="today">← Today</button><span class="chip">${esc(deckName)}</span></div>
-      <div class="card-panel done"><div class="ember"></div><h2>${r.answered ? 'Session complete.' : 'Nothing due right now.'}</h2>
+      <div class="card-panel done">${FLAME_SVG(56)}<h2>${r.answered ? 'Session complete.' : 'Nothing due right now.'}</h2>
         <p class="sub" style="margin:0 auto">${r.answered ? `You answered ${r.answered} ${r.answered===1?'card':'cards'} just now, ${st.reviews} today.` : ''} ${wait ? `Next learning card comes back ${fmtDue(wait.due, now)}.` : 'The scheduler will bring cards back exactly when they start to fade.'}</p>
         <div class="row" style="justify-content:center;margin-top:20px;gap:10px;flex-wrap:wrap"><button class="btn primary" data-nav="today">Back to Today</button><button class="btn" data-nav="add">Add more cards</button></div>
       </div></div>`;
@@ -403,77 +525,205 @@ document.addEventListener('keydown', e => {
 });
 
 // ------------------------------------------------------------ Add cards
+function pasteDeckPicker(sel){
+  return `<div class="field"><label for="pDeck">Put the cards in</label><div class="row" style="gap:8px;flex-wrap:wrap"><select class="input grow" id="pDeck" style="min-width:180px">${deckOptions(sel)}<option value="__new" ${sel==='__new'?'selected':''}>＋ New deck…</option></select><input class="input grow" id="pNewDeck" placeholder="New deck name" style="min-width:160px" ${state.paste.deck==='__new'?'':'hidden'} value="${esc(state.paste.newDeck||'')}"></div></div>`;
+}
+function pastePanel(){
+  const p = state.paste;
+  return `<div class="card-panel" style="padding:20px">
+      <div class="aibox">
+        <div class="grow"><b>Have an AI assistant write them</b><div class="hint">Copy the prompt, paste it into Claude, ChatGPT, Gemini or any assistant with your notes, then paste the reply below. No file, no account needed.</div></div>
+        <button class="btn sm" id="copyPrompt">Copy prompt</button>
+      </div>
+      ${pasteDeckPicker(p.deck || [...store.decks.values()][0]?.id)}
+      <div class="field" style="margin-top:12px"><label for="pText">Paste or type your cards</label><textarea class="input" id="pText" rows="10" spellcheck="false" placeholder="What does R0 measure? | The average number of people one case infects in a fully susceptible population
+Water boils at {{c1::100 °C}} at sea level
+bonjour | hello | French greeting">${esc(p.text || '')}</textarea></div>
+      <details class="fmt"><summary>Formats it understands</summary>
+        <ul>
+          <li><code>question | answer</code>, one per line. A third <code>|</code> part becomes a hint.</li>
+          <li><code>Q:</code> and <code>A:</code> on separate lines, or a question line followed by its answer line.</li>
+          <li>Markdown tables, tab-separated columns, and <code>question :: answer</code>.</li>
+          <li><code>{{c1::hidden text}}</code> anywhere makes a fill-in-the-blank card.</li>
+          <li><code>Deck: Name</code> on its own line sends the cards below it to that deck, creating it if needed.</li>
+          <li>Add <code>#tag</code> at the end of a line to tag the card.</li>
+          <li>Switch the mode below to <b>Vocabulary</b> to make both directions of each pair.</li>
+        </ul>
+      </details>
+      <div class="row" style="margin-top:12px;gap:10px;flex-wrap:wrap">
+        <div class="seg" id="pMode"><button data-mode="qa" aria-pressed="${p.mode!=='vocab'}">Question &amp; answer</button><button data-mode="vocab" aria-pressed="${p.mode==='vocab'}">Vocabulary (both ways)</button></div>
+      </div>
+      <div id="pastePreview">${pastePreviewHTML()}</div>
+    </div>`;
+}
+function pastePreviewHTML(){
+  const notes = state.paste.notes;
+  if (!notes) return '';
+  if (!notes.length) return `<div class="banner" style="margin-top:16px">No cards found yet. Try <code>question | answer</code> on each line.</div>`;
+  const on = notes.filter(n => n.on !== false).length;
+  const cards = notes.reduce((a, n) => a + (n.on === false ? 0 : n.type === 'vocab' && n.back ? 2 : n.type === 'cloze' ? Math.max(1, clozeIndices(n.front).length) : 1), 0);
+  return `<div class="section-h" style="margin-top:20px"><h2>${on} of ${notes.length} selected${cards !== on ? ` · ${cards} cards` : ''}</h2><span class="row" style="gap:8px"><button class="btn ghost sm" id="propAll">All</button><button class="btn ghost sm" id="propNone">None</button></span></div>
+    <div class="gen-out" id="props" style="margin-top:10px">${notes.map(propRow).join('')}</div>
+    <div class="row" style="gap:10px;margin-top:14px;flex-wrap:wrap"><button class="btn primary" id="addProps">Add ${cards} ${cards===1?'card':'cards'}</button><button class="btn ghost" id="discardProps">Clear</button></div>`;
+}
+function propRow(p, i){
+  const kind = p.type === 'cloze' ? 'Fill in the blank' : p.type === 'vocab' ? 'Both directions' : 'Question · answer';
+  return `<div class="prop" data-i="${i}"><input type="checkbox" ${p.on === false ? '' : 'checked'} aria-label="Include this card"><div class="f"><span class="tag">${kind}${p.deck ? ` · ${esc(p.deck)}` : ''}${(p.tags||[]).map(t => ` · #${esc(t)}`).join('')}</span><textarea class="front" data-k="front" rows="1">${esc(p.front)}</textarea>${p.type === 'cloze' ? '' : `<textarea data-k="back" rows="1" placeholder="Answer">${esc(p.back || '')}</textarea>`}${p.extra ? `<textarea data-k="extra" rows="1" placeholder="Extra">${esc(p.extra)}</textarea>` : ''}</div></div>`;
+}
+function autosize(el){ el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 260) + 'px'; }
+function refreshPreview(){
+  state.paste.notes = parsePasted(state.paste.text || '', state.paste.mode);
+  const box = $('#pastePreview'); if (!box) return;
+  box.innerHTML = pastePreviewHTML();
+  $$('#props textarea').forEach(autosize);
+  wirePreview();
+}
+function wirePreview(){
+  const props = $('#props');
+  if (props){
+    props.addEventListener('input', e => {
+      const row = e.target.closest('.prop'); if (!row) return;
+      const p = state.paste.notes[+row.dataset.i]; if (!p) return;
+      if (e.target.type === 'checkbox'){ p.on = e.target.checked; const h = $('#pastePreview .section-h h2'); if (h) h.textContent = `${state.paste.notes.filter(x => x.on !== false).length} of ${state.paste.notes.length} selected`; }
+      else if (e.target.dataset.k){ p[e.target.dataset.k] = e.target.value; autosize(e.target); }
+    });
+  }
+  const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
+  on('#propAll', () => { state.paste.notes.forEach(n => n.on = true); refreshPreview(); });
+  on('#propNone', () => { state.paste.notes.forEach(n => n.on = false); refreshPreview(); });
+  on('#discardProps', () => { state.paste.text = ''; state.paste.notes = null; render(); });
+  on('#addProps', async () => {
+    const sel = state.paste.notes.filter(n => n.on !== false);
+    if (!sel.length){ toast('Select at least one card.'); return; }
+    let deckId = state.paste.deck;
+    if (deckId === '__new'){ deckId = await ensureDeck(state.paste.newDeck); if (!deckId){ toast('Name the new deck first.'); return; } }
+    if (!deckId) deckId = [...store.decks.values()][0]?.id;
+    if (!deckId){ toast('Make a deck first.'); return; }
+    const n = await addNotes(deckId, sel);
+    state.paste.text = ''; state.paste.notes = null; state.paste.deck = deckId; state.paste.newDeck = '';
+    toast(`Added ${n} ${n===1?'card':'cards'}`); render();
+  });
+}
+
 function viewAdd(){
-  const g = state.gen, decks = [...store.decks.values()].sort((a,b)=>(a.order??0)-(b.order??0));
-  const noDecks = !decks.length;
+  const decks = [...store.decks.values()];
+  if (!decks.length) return `<div class="view">${localBanner()}<div><div class="eyebrow">Add cards</div><h1 class="title">From notes to cards in a minute.</h1></div><div class="card-panel empty"><h3>Make a deck first</h3><button class="btn primary" id="newDeck" style="margin-top:8px">+ New deck</button></div></div>`;
   return `<div class="view">
     ${localBanner()}
     <div><div class="eyebrow">Add cards</div><h1 class="title">From notes to cards in a minute.</h1></div>
-    <div class="seg" role="tablist"><button role="tab" aria-pressed="${state.addTab==='quick'}" data-addtab="quick">Quick add</button><button role="tab" aria-pressed="${state.addTab==='claude'}" data-addtab="claude">✦ Ask an AI assistant</button></div>
-    ${noDecks ? `<div class="card-panel empty"><h3>Make a deck first</h3><button class="btn primary" id="newDeck" style="margin-top:8px">+ New deck</button></div>` : state.addTab === 'claude' ? `
-    <div class="card-panel" style="padding:22px">
-      <h2 class="serif" style="font-weight:500;font-size:22px;margin-bottom:8px">Let an AI assistant write the cards</h2>
-      <p class="sub">Paste a paper, lecture notes, or a word list into Claude, ChatGPT, or any assistant and ask for Ember cards. It hands back a backup file; restore it here and the cards land in the right deck.</p>
-      <ol style="padding-left:20px;color:var(--ink-2);display:flex;flex-direction:column;gap:8px;margin:14px 0">
-        <li>Tap <b>Copy deck list</b> and paste it into the assistant along with your source text. Say: <em>“Write Ember flashcards from this for my ${esc(decks[0].name)} deck and give me the backup file.”</em></li>
-        <li>Save the <code class="mono">.json</code> file it gives you.</li>
-        <li>Tap <b>Restore backup</b> and choose that file. Existing cards are untouched.</li>
-      </ol>
-      <div class="row" style="gap:10px;flex-wrap:wrap"><label class="btn primary" for="importFile2" style="cursor:pointer">Restore backup…<input type="file" id="importFile2" accept="application/json,.json" hidden></label><button class="btn" id="copyDeckIds">Copy deck list</button></div>
-      <p class="hint" style="margin-top:12px">Quick add works too: paste the assistant's cards as <code>question | answer</code> lines.</p>
-    </div>` : `
-    <div class="card-panel" style="padding:20px">
-      <div class="grid2" style="margin-bottom:14px">
-        <div class="field"><label for="qaDeck">Deck</label><select class="input" id="qaDeck">${deckOptions(g.deck || decks[0].id)}</select></div>
-        <div class="field"><label for="qaMode">Line format</label><select class="input" id="qaMode"><option value="qa" ${(g.qaMode||'qa')==='qa'?'selected':''}>question | answer</option><option value="vocab" ${g.qaMode==='vocab'?'selected':''}>term = meaning (makes both directions)</option></select></div>
-      </div>
-      <div class="field"><label for="qaText">One card per line</label><textarea class="input" id="qaText" rows="9" placeholder="What is the powerhouse of the cell? | The mitochondrion&#10;Water boils at {{c1::100 °C}} at sea level&#10;bonjour = hello">${esc(g.qaText || '')}</textarea></div>
-      <p class="hint">Add a third part after another <code>|</code> for a hint or context. Wrap text in <code>{{c1::…}}</code> to make a fill-in-the-blank card.</p>
-      <div class="row" style="margin-top:8px"><button class="btn primary" id="qaAdd">Add cards</button></div>
-    </div>`}
+    ${pastePanel()}
   </div>`;
 }
-function parseQuick(text, mode){
-  const notes = [];
-  for (const raw of text.split('\n')){ const line = raw.trim(); if (!line) continue;
-    if (CLOZE_RE.test(line)){ CLOZE_RE.lastIndex = 0; const [f, ...rest] = line.split('|'); notes.push({ type: 'cloze', front: f.trim(), extra: rest.join('|').trim() }); continue; }
-    CLOZE_RE.lastIndex = 0;
-    if (mode === 'vocab' && line.includes('=') && !line.includes('|')){ const i = line.indexOf('='); notes.push({ type: 'vocab', front: line.slice(0,i).trim(), back: line.slice(i+1).trim() }); continue; }
-    const parts = line.split('|').map(s => s.trim());
-    if (parts.length >= 2) notes.push({ type: mode === 'vocab' ? 'vocab' : 'basic', front: parts[0], back: parts[1], extra: parts.slice(2).join(' | ') });
-    else notes.push({ type: 'basic', front: parts[0], back: '' });
-  }
-  return notes;
-}
 async function addNotes(deckId, notes){
-  const cards = notes.flatMap(n => expandNote(deckId, n));
-  for (const c of cards) await store.put('cards', c);
-  return cards.length;
+  let n = 0;
+  for (const note of notes){
+    const target = note.deck ? (await ensureDeck(note.deck)) || deckId : deckId;
+    for (const c of expandNote(target, note)) { await store.put('cards', c); n++; }
+  }
+  return n;
 }
 // ------------------------------------------------------------ Browse
 function viewBrowse(){
-  const b = state.browse, q = b.q.trim().toLowerCase(), now = Date.now();
+  const b = state.browse, q = b.q.trim().toLowerCase(), now = Date.now(), sel = state.sel;
   let list = [...store.cards.values()];
   if (b.deck) list = list.filter(c => c.deckId === b.deck);
-  if (b.state) list = list.filter(c => b.state === 'suspended' ? c.suspended : b.state === 'leech' ? c.leech : c.state === b.state);
-  if (q) list = list.filter(c => (plainFront(c) + ' ' + c.back + ' ' + (c.extra||'')).toLowerCase().includes(q));
-  list.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
-  const shown = list.slice(0, 300);
+  if (b.state) list = list.filter(c => b.state === 'suspended' ? c.suspended : b.state === 'leech' ? c.leech : (!c.suspended && c.state === b.state));
+  if (b.tag) list = list.filter(c => (c.tags || []).includes(b.tag));
+  if (q) list = list.filter(c => (plainFront(c) + ' ' + c.back + ' ' + (c.extra||'') + ' ' + (c.tags||[]).join(' ')).toLowerCase().includes(q));
+  list.sort((x, y) => (y.createdAt||0) - (x.createdAt||0));
+  const shown = list.slice(0, 500);
+  const allOn = shown.length > 0 && shown.every(c => sel.has(c.id));
+  const tags = allTags();
   return `<div class="view">
     <div><div class="eyebrow">Browse</div><h1 class="title">${store.cards.size} ${store.cards.size===1?'card':'cards'}</h1></div>
     <div class="row" style="flex-wrap:wrap;gap:10px">
-      <input class="input grow" id="bq" placeholder="Search cards" value="${esc(b.q)}" style="min-width:180px">
+      <input class="input grow" id="bq" placeholder="Search cards" value="${esc(b.q)}" style="min-width:170px">
       <select class="input" id="bdeck" style="width:auto"><option value="">All decks</option>${deckOptions(b.deck)}</select>
       <select class="input" id="bstate" style="width:auto"><option value="">Any state</option>${[['new','New'],['learning','Learning'],['review','Review'],['relearning','Relearning'],['suspended','Suspended'],['leech','Leeches']].map(([v,l]) => `<option value="${v}" ${b.state===v?'selected':''}>${l}</option>`).join('')}</select>
+      ${tags.length ? `<select class="input" id="btag" style="width:auto"><option value="">Any tag</option>${tags.map(t => `<option ${b.tag===t?'selected':''}>${esc(t)}</option>`).join('')}</select>` : ''}
     </div>
     <div class="card-panel">
-      ${shown.length ? shown.map(c => { const dk = store.decks.get(c.deckId); return `<button class="browse-row" data-card="${c.id}">
-        <span class="grow"><div class="q">${cardFrontHTML(c)}</div><div class="a">${esc(c.type === 'cloze' ? (c.extra || '') : c.back)}</div></span>
-        <span class="m"><span class="state-pill state-${c.suspended ? 'suspended' : c.state}">${c.suspended ? 'suspended' : c.state}</span><br>${c.state === 'new' ? esc(dk?.name || '') : `due ${fmtDue(c.due, now)}`}</span>
-      </button>`; }).join('') : `<div class="empty"><h3>No cards match</h3>Try a different search or deck.</div>`}
+      <div class="browse-head">
+        <label class="cb"><input type="checkbox" id="selAll" ${allOn?'checked':''} ${shown.length?'':'disabled'}><span>${sel.size ? `${sel.size} selected` : shown.length ? `Select all ${shown.length}` : 'Nothing to select'}</span></label>
+        ${sel.size ? `<span class="row bulk" style="gap:6px;flex-wrap:wrap">
+          <button class="btn sm" data-bulk="deck">Move to deck…</button>
+          <button class="btn sm" data-bulk="tag">Tags…</button>
+          <button class="btn sm" data-bulk="suspend">${[...sel].every(id => store.cards.get(id)?.suspended) ? 'Unsuspend' : 'Suspend'}</button>
+          <button class="btn sm" data-bulk="reset">Reset progress</button>
+          <button class="btn danger sm" data-bulk="delete">Delete</button>
+          <button class="btn ghost sm" data-bulk="clear">Clear</button>
+        </span>` : '<span class="hint">Tick cards to move, tag, suspend or delete them together.</span>'}
+      </div>
+      ${shown.length ? shown.map(c => browseRow(c, now, sel.has(c.id))).join('') : `<div class="empty"><h3>No cards match</h3>Try a different search, deck or tag.</div>`}
       ${list.length > shown.length ? `<div class="empty" style="padding:14px">Showing the first ${shown.length} of ${list.length}. Narrow the search to see the rest.</div>` : ''}
     </div>
   </div>`;
+}
+function browseRow(c, now, on){
+  const dk = store.decks.get(c.deckId);
+  return `<div class="browse-row ${on?'on':''}">
+    <input type="checkbox" class="pick" data-pick="${c.id}" ${on?'checked':''} aria-label="Select this card">
+    <button class="rowopen" data-card="${c.id}">
+      <div class="q">${cardFrontHTML(c)}</div>
+      <div class="a">${esc(c.type === 'cloze' ? (c.extra || '') : c.back)}</div>
+      ${(c.tags||[]).length ? `<div class="tagrow">${c.tags.map(t => `<span class="tchip">#${esc(t)}</span>`).join('')}</div>` : ''}
+    </button>
+    <span class="m"><span class="state-pill state-${c.suspended ? 'suspended' : c.state}">${c.suspended ? 'suspended' : c.state}</span><br>${esc(dk?.name || '')}<br>${c.state === 'new' ? '' : `due ${fmtDue(c.due, now)}`}</span>
+  </div>`;
+}
+async function bulk(action){
+  const ids = [...state.sel].filter(id => store.cards.has(id));
+  if (!ids.length) return;
+  const n = ids.length, word = `${n} ${n===1?'card':'cards'}`;
+  if (action === 'clear'){ state.sel.clear(); render(); return; }
+  if (action === 'deck'){
+    openDialog(`<h3>Move ${word}</h3>
+      <div class="field"><label for="mDeck">Deck</label><select class="input" id="mDeck">${deckOptions(store.cards.get(ids[0]).deckId)}<option value="__new">＋ New deck…</option></select></div>
+      <div class="field" id="mNewWrap" hidden><label for="mNew">New deck name</label><input class="input" id="mNew" placeholder="e.g. Week 3"></div>
+      <div class="dlg-actions"><span></span><span class="row" style="gap:6px"><button class="btn sm" id="mCancel">Cancel</button><button class="btn primary sm" id="mOk">Move</button></span></div>`);
+    $('#mDeck').onchange = e => { $('#mNewWrap').hidden = e.target.value !== '__new'; if (!$('#mNewWrap').hidden) $('#mNew').focus(); };
+    $('#mCancel').onclick = closeDialog;
+    $('#mOk').onclick = async () => {
+      let id = $('#mDeck').value;
+      if (id === '__new'){ id = await ensureDeck($('#mNew').value); if (!id){ $('#mNew').focus(); return; } }
+      for (const cid of ids) await store.put('cards', { ...store.cards.get(cid), deckId: id });
+      closeDialog(); state.sel.clear(); toast(`Moved ${word}`); render();
+    };
+    return;
+  }
+  if (action === 'tag'){
+    const existing = allTags();
+    openDialog(`<h3>Tags for ${word}</h3>
+      <div class="field"><label for="tAdd">Add tags</label><input class="input" id="tAdd" list="tagList" placeholder="week3, exam (comma separated)"><datalist id="tagList">${existing.map(t => `<option value="${esc(t)}">`).join('')}</datalist></div>
+      <div class="field"><label for="tDel">Remove tags</label><input class="input" id="tDel" list="tagList" placeholder="leave empty to keep all"></div>
+      <div class="dlg-actions"><span></span><span class="row" style="gap:6px"><button class="btn sm" id="tCancel">Cancel</button><button class="btn primary sm" id="tOk">Apply</button></span></div>`);
+    $('#tCancel').onclick = closeDialog;
+    $('#tOk').onclick = async () => {
+      const add = parseTags($('#tAdd').value), del = parseTags($('#tDel').value);
+      if (!add.length && !del.length){ closeDialog(); return; }
+      for (const cid of ids){ const c = store.cards.get(cid);
+        const tags = [...new Set([...(c.tags||[]), ...add])].filter(t => !del.includes(t));
+        await store.put('cards', { ...c, tags }); }
+      closeDialog(); toast(`Updated ${word}`); render();
+    };
+    setTimeout(() => $('#tAdd')?.focus(), 30);
+    return;
+  }
+  if (action === 'suspend'){
+    const makeSuspended = !ids.every(id => store.cards.get(id).suspended);
+    for (const id of ids) await store.put('cards', { ...store.cards.get(id), suspended: makeSuspended });
+    toast(`${makeSuspended ? 'Suspended' : 'Unsuspended'} ${word}`); render(); return;
+  }
+  if (action === 'reset'){
+    if (!(await ask(`Reset ${word} to new? Their review history is kept but scheduling starts over.`))) return;
+    for (const id of ids) await store.put('cards', { ...store.cards.get(id), state: 'new', remaining: 0, due: 0, S: 0, D: 0, ivl: 0, lastReview: 0, leech: false });
+    toast(`Reset ${word}`); render(); return;
+  }
+  if (action === 'delete'){
+    if (!(await ask(`Delete ${word} permanently? This cannot be undone.`))) return;
+    for (const id of ids) await store.remove('cards', id);
+    state.sel.clear(); toast(`Deleted ${word}`); render();
+  }
 }
 
 // ------------------------------------------------------------ Stats
@@ -555,13 +805,14 @@ function openCardDialog(c){
     <div class="field"><label for="eFront">${c.type === 'cloze' ? 'Text with {{c1::blanks}}' : 'Front'}</label><textarea class="input" id="eFront" rows="3">${esc(c.front)}</textarea></div>
     ${c.type === 'cloze' ? '' : `<div class="field"><label for="eBack">Back</label><textarea class="input" id="eBack" rows="3">${esc(c.back)}</textarea></div>`}
     <div class="field"><label for="eExtra">Extra</label><input class="input" id="eExtra" value="${esc(c.extra||'')}"></div>
+    <div class="field"><label for="eTags">Tags</label><input class="input" id="eTags" value="${esc((c.tags||[]).join(', '))}" placeholder="comma separated" list="tagList"><datalist id="tagList">${allTags().map(t => `<option value="${esc(t)}">`).join('')}</datalist></div>
     <div class="hint mono">${c.state} · ${c.reps||0} reviews · ${c.lapses||0} lapses${c.S ? ` · stability ${fmtIvl(c.S)}` : ''}${c.pairId ? ' · part of a vocabulary pair' : ''}${c.noteId ? ' · one of several blanks from one note' : ''}</div>
     <div class="dlg-actions">
       <span class="row" style="gap:6px;flex-wrap:wrap"><button class="btn ghost sm" id="eSusp">${c.suspended ? 'Unsuspend' : 'Suspend'}</button><button class="btn ghost sm" id="eReset">Reset progress</button><button class="btn danger sm" id="eDel">Delete</button></span>
       <span class="row" style="gap:6px"><button class="btn sm" id="eCancel">Cancel</button><button class="btn primary sm" id="eSave">Save</button></span>
     </div>`);
   $('#eCancel').onclick = closeDialog;
-  $('#eSave').onclick = async () => { const upd = { ...c, deckId: $('#eDeck').value, front: $('#eFront').value.trim(), extra: $('#eExtra').value.trim() }; if (c.type !== 'cloze') upd.back = $('#eBack').value.trim(); await store.put('cards', upd); closeDialog(); toast('Saved'); if (state.review){ state.review.outcomes = null; } render(); };
+  $('#eSave').onclick = async () => { const upd = { ...c, deckId: $('#eDeck').value, front: $('#eFront').value.trim(), extra: $('#eExtra').value.trim(), tags: parseTags($('#eTags').value) }; if (c.type !== 'cloze') upd.back = $('#eBack').value.trim(); await store.put('cards', upd); closeDialog(); toast('Saved'); if (state.review){ state.review.outcomes = null; } render(); };
   $('#eSusp').onclick = async () => { await store.put('cards', { ...c, suspended: !c.suspended }); closeDialog(); toast(c.suspended ? 'Unsuspended' : 'Suspended'); if (state.review && state.review.current === c.id){ state.review.current = null; state.review.flipped = false; } render(); };
   $('#eReset').onclick = async () => { if (!(await ask('Reset this card to new? Its review history is kept.'))) return; await store.put('cards', { ...c, state: 'new', remaining: 0, due: 0, S: 0, D: 0, ivl: 0, lastReview: 0, leech: false }); closeDialog(); toast('Reset to new'); if (state.review){ state.review.outcomes = null; } render(); };
   $('#eDel').onclick = async () => { if (!(await ask('Delete this card permanently?'))) return; await store.remove('cards', c.id); closeDialog(); toast('Deleted'); if (state.review && state.review.current === c.id){ state.review.current = null; state.review.flipped = false; } render(); };
@@ -588,13 +839,57 @@ $('#dlg').addEventListener('click', e => { if (e.target === e.currentTarget) clo
 
 // ------------------------------------------------------------ wiring
 async function importBackup(f){
-  try { const j = JSON.parse(await f.text()); let n = 0;
-    for (const d of j.decks || []) if (d.id && d.name) await store.put('decks', d);
-    for (const c of j.cards || []) if (c.id && c.deckId){ if (!store.decks.has(c.deckId)){ toast(`Skipped a card for unknown deck "${c.deckId}"`); continue; } await store.put('cards', c); n++; }
-    for (const s of j.stats || []) if (s.id) await store.put('stats', s);
-    if (j.settings) await store.saveSettings(j.settings);
-    toast(`Restored ${n} ${n===1?'card':'cards'}`); render();
-  } catch { toast('That file is not an Ember backup.'); }
+  let j;
+  try { j = JSON.parse(await f.text()); } catch { toast('That file is not valid JSON.'); return; }
+  const cards = Array.isArray(j) ? j : (j.cards || []);
+  if (!cards.length){ toast('No cards found in that file.'); return; }
+  const fileDecks = (j.decks || []).filter(d => d && d.id && d.name);
+  const guess = (j.deckName || f.name.replace(/\.json$/i, '').replace(/^ember[-_ ]*(backup[-_ ]*)?/i, '').replace(/[-_]+/g, ' ').trim()) || 'Imported cards';
+  const pretty = guess.charAt(0).toUpperCase() + guess.slice(1);
+  const known = new Set(fileDecks.map(d => d.id));
+  const matchesExisting = cards.every(c => store.decks.has(c.deckId));
+  openDialog(`<h3>Import ${cards.length} ${cards.length===1?'card':'cards'}</h3>
+    <p class="sub" style="margin:0">Choose where they land. Nothing already in Ember is deleted.</p>
+    <div class="field"><label for="iDeck">Put them in</label><select class="input" id="iDeck">
+      <option value="__new">New deck: ${esc(pretty)}</option>
+      ${deckOptions('')}
+      ${fileDecks.length || matchesExisting ? '<option value="__keep">Keep the decks named in the file</option>' : ''}
+    </select></div>
+    <div class="field" id="iNewWrap"><label for="iNew">New deck name</label><input class="input" id="iNew" value="${esc(pretty)}"></div>
+    <label class="cb" style="padding:2px 0"><input type="checkbox" id="iProgress" ${j.stats ? '' : 'disabled'}><span>Also restore review history and settings${j.stats ? '' : ' (not in this file)'}</span></label>
+    <div class="dlg-actions"><span></span><span class="row" style="gap:6px"><button class="btn sm" id="iCancel">Cancel</button><button class="btn primary sm" id="iOk">Import</button></span></div>`);
+  $('#iDeck').onchange = e => { $('#iNewWrap').hidden = e.target.value !== '__new'; };
+  $('#iCancel').onclick = closeDialog;
+  $('#iOk').onclick = async () => {
+    const choice = $('#iDeck').value;
+    let target = choice;
+    if (choice === '__new'){ target = await ensureDeck($('#iNew').value || pretty); if (!target){ $('#iNew').focus(); return; } }
+    if (choice === '__keep'){
+      for (const d of fileDecks) if (!store.decks.has(d.id)) await store.put('decks', { ...d, order: store.decks.size });
+    }
+    let n = 0, fresh = 0;
+    for (const c of cards){
+      if (!c || !c.front) continue;
+      let deckId = target;
+      if (choice === '__keep') deckId = store.decks.has(c.deckId) ? c.deckId : (await ensureDeck((fileDecks.find(d => d.id === c.deckId) || {}).name || pretty));
+      const id = store.cards.has(c.id) ? uid('c') : (c.id || uid('c'));
+      const card = { ...newCard(deckId, c.type === 'cloze' ? 'cloze' : 'basic', String(c.front), String(c.back || ''), String(c.extra || '')), ...c, id, deckId };
+      if (!Array.isArray(card.tags)) card.tags = [];
+      if (!Array.isArray(card.history)) card.history = [];
+      if ($('#iProgress').checked === false){ Object.assign(card, { state: 'new', remaining: 0, due: 0, S: 0, D: 0, ivl: 0, reps: 0, lapses: 0, lastReview: 0, history: [] }); }
+      if (card.state === 'new') fresh++;
+      await store.put('cards', card); n++;
+    }
+    if ($('#iProgress').checked){
+      for (const st of j.stats || []) if (st && st.id) await store.put('stats', st);
+      if (j.settings) await store.saveSettings(j.settings);
+    }
+    closeDialog();
+    toast(`Imported ${n} ${n===1?'card':'cards'}${fresh === n ? '' : `, ${fresh} new`}`);
+    state.browse = { q: '', deck: choice === '__keep' ? '' : target, state: '', tag: '' };
+    go('browse');
+  };
+  setTimeout(() => $('#iNew')?.select(), 30);
 }
 function afterRender(){
   const m = $('#main');
@@ -610,15 +905,35 @@ function afterRender(){
   on('#undoBtn', 'click', undo);
   // add
   $$('[data-addtab]', m).forEach(b => b.addEventListener('click', () => { state.addTab = b.dataset.addtab; render(); }));
-  on('#qaText', 'input', e => { state.gen.qaText = e.target.value; });
-  on('#qaDeck', 'change', e => { state.gen.deck = e.target.value; });
-  on('#qaMode', 'change', e => { state.gen.qaMode = e.target.value; });
-  on('#qaAdd', 'click', async () => { const notes = parseQuick($('#qaText').value, $('#qaMode').value); if (!notes.length){ toast('Type at least one line.'); return; } const n = await addNotes($('#qaDeck').value, notes); state.gen.qaText = ''; toast(`Added ${n} ${n===1?'card':'cards'}`); render(); });
+  on('#copyPrompt', 'click', async () => { try { await navigator.clipboard.writeText(AI_PROMPT); toast('Prompt copied. Paste it into any AI assistant with your notes.'); } catch { toast('Could not copy. Select the prompt in the help text instead.'); } });
+  on('#pDeck', 'change', e => { state.paste.deck = e.target.value; const nd = $('#pNewDeck'); if (nd){ nd.hidden = e.target.value !== '__new'; if (!nd.hidden) nd.focus(); } });
+  on('#pNewDeck', 'input', e => { state.paste.newDeck = e.target.value; });
+  $$('#pMode [data-mode]', m).forEach(b => b.addEventListener('click', () => { state.paste.mode = b.dataset.mode; $$('#pMode button', m).forEach(x => x.setAttribute('aria-pressed', x === b)); refreshPreview(); }));
+  const pt = $('#pText', m);
+  if (pt){
+    let t; pt.addEventListener('input', e => { state.paste.text = e.target.value; clearTimeout(t); t = setTimeout(refreshPreview, 250); });
+    pt.addEventListener('paste', () => setTimeout(() => { state.paste.text = pt.value; refreshPreview(); }, 0));
+  }
+  $$('#props textarea', m).forEach(autosize);
+  wirePreview();
   // browse
   on('#bq', 'input', e => { state.browse.q = e.target.value; const pos = e.target.selectionStart; render(); const el = $('#bq'); el.focus(); el.setSelectionRange(pos, pos); });
-  on('#bdeck', 'change', e => { state.browse.deck = e.target.value; render(); });
-  on('#bstate', 'change', e => { state.browse.state = e.target.value; render(); });
+  on('#bdeck', 'change', e => { state.browse.deck = e.target.value; state.sel.clear(); render(); });
+  on('#bstate', 'change', e => { state.browse.state = e.target.value; state.sel.clear(); render(); });
+  on('#btag', 'change', e => { state.browse.tag = e.target.value; state.sel.clear(); render(); });
   $$('[data-card]', m).forEach(b => b.addEventListener('click', () => openCardDialog(store.cards.get(b.dataset.card))));
+  $$('[data-pick]', m).forEach(cb => cb.addEventListener('change', e => {
+    const id = cb.dataset.pick;
+    if (e.target.checked) state.sel.add(id); else state.sel.delete(id);
+    cb.closest('.browse-row').classList.toggle('on', e.target.checked);
+    render();
+  }));
+  on('#selAll', 'change', e => {
+    const ids = $$('[data-pick]', m).map(x => x.dataset.pick);
+    if (e.target.checked) ids.forEach(id => state.sel.add(id)); else ids.forEach(id => state.sel.delete(id));
+    render();
+  });
+  $$('[data-bulk]', m).forEach(b => b.addEventListener('click', () => bulk(b.dataset.bulk)));
   // settings
   on('#sRet', 'input', e => { $('#sRetV').textContent = e.target.value + '%'; });
   on('#saveSettings', 'click', async () => {
