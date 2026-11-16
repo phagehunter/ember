@@ -444,7 +444,7 @@ function viewReview(){
     return `<div class="view">
       <div class="rv-top"><button class="btn ghost sm" data-nav="today">← Today</button><span class="chip">${esc(deckName)}</span></div>
       <div class="card-panel done">${FLAME_SVG(56)}<h2>${r.answered ? 'Session complete.' : 'Nothing due right now.'}</h2>
-        <p class="sub" style="margin:0 auto">${r.answered ? `You answered ${r.answered} ${r.answered===1?'card':'cards'} just now, ${st.reviews} today.` : ''} ${wait ? `Next learning card comes back ${fmtDue(wait.due, now)}.` : 'The scheduler will bring cards back exactly when they start to fade.'}</p>
+        <p class="sub" style="margin:0 auto">${r.answered ? `You answered ${r.answered} ${r.answered===1?'card':'cards'} just now, ${st.reviews} today.` : ''} ${wait ? `Next learning card comes back ${fmtDue(wait.due, now)}.` : 'The scheduler will bring each card back when your predicted recall drops to your target.'}</p>
         <div class="row" style="justify-content:center;margin-top:20px;gap:10px;flex-wrap:wrap"><button class="btn primary" data-nav="today">Back to Today</button><button class="btn" data-nav="add">Add more cards</button></div>
       </div></div>`;
   }
@@ -607,10 +607,10 @@ function wirePreview(){
 
 function viewAdd(){
   const decks = [...store.decks.values()];
-  if (!decks.length) return `<div class="view">${localBanner()}<div><div class="eyebrow">Add cards</div><h1 class="title">From notes to cards in a minute.</h1></div><div class="card-panel empty"><h3>Make a deck first</h3><button class="btn primary" id="newDeck" style="margin-top:8px">+ New deck</button></div></div>`;
+  if (!decks.length) return `<div class="view">${localBanner()}<div><div class="eyebrow">Add cards</div><h1 class="title">Paste your notes to make cards.</h1></div><div class="card-panel empty"><h3>Make a deck first</h3><button class="btn primary" id="newDeck" style="margin-top:8px">+ New deck</button></div></div>`;
   return `<div class="view">
     ${localBanner()}
-    <div><div class="eyebrow">Add cards</div><h1 class="title">From notes to cards in a minute.</h1></div>
+    <div><div class="eyebrow">Add cards</div><h1 class="title">Paste your notes to make cards.</h1></div>
     ${pastePanel()}
   </div>`;
 }
@@ -746,7 +746,7 @@ function viewStats(){
   const bars = fc.map((v, i) => `<rect class="bar" x="${(i*bw+1).toFixed(1)}" y="${(H - v/fmax*H).toFixed(1)}" width="${(bw-2).toFixed(1)}" height="${(v/fmax*H).toFixed(1)}" rx="3"><title>${new Date(dayStart(now)+i*DAY).toLocaleDateString(undefined,{month:'short',day:'numeric'})}: ${v} due</title></rect>`).join('');
   const total = cards.length || 1;
   return `<div class="view">
-    <div><div class="eyebrow">Stats</div><h1 class="title">${tot ? `${ret}% remembered over 30 days.` : 'Your memory, measured.'}</h1><p class="sub">The scheduler aims for ${Math.round(store.settings.desiredRetention*100)}% recall at review time. Landing near that number means the intervals fit you.</p></div>
+    <div><div class="eyebrow">Stats</div><h1 class="title">${tot ? `${ret}% remembered over 30 days.` : 'No reviews yet.'}</h1><p class="sub">The scheduler aims for ${Math.round(store.settings.desiredRetention*100)}% recall at review time. Landing near that number means the intervals fit you.</p></div>
     <div class="tiles">
       <div class="card-panel tile"><span class="v">${st.reviews}</span><span class="l">reviewed today</span></div>
       <div class="card-panel tile"><span class="v">${s}</span><span class="l">day streak</span></div>
